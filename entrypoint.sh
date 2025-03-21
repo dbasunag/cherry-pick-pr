@@ -5,7 +5,7 @@ set -e
 REPO_NAME=$(jq -r ".repository.full_name" "$GITHUB_EVENT_PATH")
 
 onerror() {
-	gh pr comment $PR_NUMBER --body "🤖 says: ‼️ cherry pick action failed.<br/>See: https://github.com/$REPO_NAME/actions/runs/$GITHUB_RUN_ID"
+	gh pr comment $PR_NUMBER --body "‼️ cherry pick action failed.<br/>See: https://github.com/$REPO_NAME/actions/runs/$GITHUB_RUN_ID"
 	exit 1
 }
 trap onerror ERR
@@ -21,9 +21,7 @@ if [ -z "$PR_NUMBER" ]; then
 	fi
 fi
 
-COMMENT_BODY=$(jq -r ".comment.body" "$GITHUB_EVENT_PATH")
-
-echo "Collecting information about PR #$PR_NUMBER of $GITHUB_REPOSITORY..."
+echo "Collecting information about PR #$PR_NUMBER from repository: $GITHUB_REPOSITORY..."
 
 if [[ -z "$GITHUB_TOKEN" ]]; then
 	echo "Set the GITHUB_TOKEN env variable."
@@ -55,11 +53,12 @@ done
 
 if [[ "$MERGED" != "true" ]] ; then
 	echo "PR is not merged! Can't cherry pick it."
-	gh pr comment $PR_NUMBER --body "🤖 says: ‼️ PR can't be cherry-picked, please merge it first."
+	gh pr comment $PR_NUMBER --body "‼️ PR can't be cherry-picked, please merge it first."
 	exit 1
 fi
 
-BASE_REPO=$(echo "$pr_resp" | jq -r .base.repo.full_name)
+PR_TITLE=$(echo "$pr_resp" | jq -r .title)
+PR_URL=$(echo "$pr_resp" | jq -r .html_url)
 
 TARGET_BRANCH=$(jq -r ".comment.body" "$GITHUB_EVENT_PATH" | awk '{ print $2 }'  | tr -d '[:space:]')
 
@@ -85,11 +84,9 @@ fi
 
 if [[ -z "$TARGET_BRANCH" ]]; then
 	echo "Cannot get target branch information for PR #$PR_NUMBER!"
-	gh pr comment $PR_NUMBER --body "🤖 says: ‼️ Cannot get target branch information."
+	gh pr comment $PR_NUMBER --body "‼️ Cannot get target branch information."
 	exit 1
 fi
-
-echo "Target branch for PR #$PR_NUMBER is $TARGET_BRANCH"
 
 USER_TOKEN=${USER_LOGIN//-/_}_TOKEN
 UNTRIMMED_COMMITTER_TOKEN=${!USER_TOKEN:-$GITHUB_TOKEN}
@@ -106,18 +103,39 @@ git remote add origindest https://$USER_LOGIN:$COMMITTER_TOKEN@github.com/$REPO_
 
 set -o xtrace
 
-# make sure branches are up-to-date
+#Check if the target branch is a found in the remote repository:
+REPO_CLONE_URL=$(echo "$pr_resp" | jq -r .base.repo.clone_url)
+
+if [[ $(git ls-remote --heads $REPO_CLONE_URL refs/heads/$TARGET_BRANCH) ]]; then
+	echo "Target branch for PR #$PR_NUMBER $TARGET_BRANCH found for repository: $GITHUB_REPOSITORY"
+else
+   	echo "Invalid target branch used for PR #$PR_NUMBER!"
+	gh pr comment $PR_NUMBER --body "‼️ Please use a valid target branch name."
+	exit 1
+fi
+
+# Fetch branches
 git fetch origin $TARGET_BRANCH
 git fetch origindest $TARGET_BRANCH
 
+# create unique branch name
+UUID=$(uuidgen)
+CHERRY_PICK_BRANCH="CherryPick-$TARGET_BRANCH-${UUID:0:4}"
 # do the cherry-pick
-git checkout -b origindest/$TARGET_BRANCH origindest/$TARGET_BRANCH
+git checkout -b $CHERRY_PICK_BRANCH origindest/$TARGET_BRANCH
+
 git cherry-pick $MERGE_COMMIT &> /tmp/error.log || (
-		gh pr comment $PR_NUMBER --body "🤖 says: Error cherry-picking.<br/><br/>$(cat /tmp/error.log)"
+		gh pr comment $PR_NUMBER --body "Error cherry-picking.<br/><br/>$(cat /tmp/error.log)"
 		exit 1
 )
 
 # push back
-git push origindest origindest/$TARGET_BRANCH:$TARGET_BRANCH
+git push origindest $CHERRY_PICK_BRANCH
 
-gh pr comment $PR_NUMBER --body "🤖 says: cherry pick action finished successfully 🎉!<br/>See: https://github.com/$REPO_NAME/actions/runs/$GITHUB_RUN_ID"
+# create the cherry-pick PR
+CHERRY_PICK_NUM=$(gh pr create -B $TARGET_BRANCH -H $CHERRY_PICK_BRANCH \
+-b "Cherry-picked $PR_URL into $TARGET_BRANCH. Requested by: $USER_LOGIN " \
+  -t "[Cherry-pick][$TARGET_BRANCH] $PR_TITLE")
+
+# add a comment to the original pr
+gh pr comment $PR_NUMBER --body "Cherry pick action created PR $CHERRY_PICK_NUM successfully 🎉!<br/>See: https://github.com/$REPO_NAME/actions/runs/$GITHUB_RUN_ID"

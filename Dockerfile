@@ -9,7 +9,7 @@ LABEL "com.github.actions.description"="Automatically Cherry Pick PR on '/cherry
 LABEL "com.github.actions.icon"="git-pull-request"
 LABEL "com.github.actions.color"="purple"
 
-RUN apk --no-cache add jq bash curl git git-lfs github-cli
+RUN apk --no-cache add jq bash curl git git-lfs github-cli uuidgen
 
 ADD entrypoint.sh /entrypoint.sh
 
